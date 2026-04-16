@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Distributed Canvas</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0f;
+      --surface:   #13131a;
+      --border:    #2a2a3a;
+      --accent:    #00ffcc;
+      --accent2:   #ff3366;
+      --text:      #e8e8f0;
+      --muted:     #555570;
+      --radius:    6px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      overflow: hidden;
+    }
+
+    /* ── GRID BACKGROUND ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.3;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── LAYOUT ── */
+    #app {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── HEADER ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+      color: var(--accent);
+    }
+
+    .logo span { color: var(--text); }
+
+    /* ── STATUS CLUSTER ── */
+    #status-cluster {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.3s;
+    }
+
+    .dot.connected  { background: var(--accent);  box-shadow: 0 0 6px var(--accent); }
+    .dot.error      { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    .dot.connecting { background: #ffaa00;        box-shadow: 0 0 6px #ffaa00;
+                      animation: pulse 1s infinite; }
+
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+
+    #status-text { font-size: 0.7rem; color: var(--muted); }
+
+    /* ── TOOLBAR ── */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .tool-label {
+      font-size: 0.65rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-right: 4px;
+    }
+
+    /* colour swatches */
+    .swatch {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .swatch:hover        { transform: scale(1.2); }
+    .swatch.active       { border-color: var(--text); }
+
+    /* size buttons */
+    .size-btn {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 4px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .size-btn:hover, .size-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .divider {
+      width: 1px; height: 20px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    #clear-btn, #restore-btn, #network-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      padding: 4px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    
+    #clear-btn {
+      margin-left: auto;
+    }
+    
+    #clear-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+    #restore-btn:hover { border-color: var(--accent); color: var(--accent); }
+    #restore-btn.loading { opacity: 0.6; cursor: not-allowed; }
+    #network-btn:hover { border-color: #00d9ff; color: #00d9ff; }
+    #network-btn.active { border-color: #00d9ff; color: #00d9ff; background: rgba(0, 217, 255, 0.1); }
+
+    /* ── CANVAS AREA ── */
+    #canvas-wrap {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    /* ── LOG PANEL ── */
+    #log-panel {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      width: 280px;
+      max-height: 160px;
+      overflow-y: auto;
+      background: rgba(10,10,15,0.92);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      font-size: 0.65rem;
+      color: var(--muted);
+      backdrop-filter: blur(8px);
+      z-index: 10;
+    }
+    #log-panel::-webkit-scrollbar { width: 4px; }
+    #log-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .log-entry { margin-bottom: 3px; line-height: 1.5; }
+    .log-entry.ok   { color: var(--accent); }
+    .log-entry.warn { color: #ffaa00; }
+    .log-entry.err  { color: var(--accent2); }
+
+    /* ── NETWORK MONITORING MODAL ── */
+    #network-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(10,10,15,0.92);
+      backdrop-filter: blur(8px);
+      z-index: 25;
+      overflow-y: auto;
+      padding: 20px;
+    }
+    #network-modal.show { display: block; }
+
+    #network-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #network-modal-header h2 {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.3rem;
+      color: var(--accent);
+    }
+
+    .close-modal {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 1.2rem;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .close-modal:hover { border-color: var(--accent2); color: var(--accent2); }
+
+    /* ── NODE GRAPH VISUALIZATION ── */
+    #network-container {
+      display: flex;
+      gap: 20px;
+      padding: 16px;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    #node-graph {
+      flex: 1;
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(10,10,15,0.5);
+      overflow: auto;
+    }
+
+    #nodes-container {
+      position: relative;
+      width: 100%;
+      min-height: 400px;
+      padding: 40px;
+    }
+
+    #topology-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .node {
+      position: absolute;
+      width: 80px;
+      height: 80px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      background: rgba(19, 19, 26, 0.9);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-size: 0.7rem;
+      text-align: center;
+      padding: 4px;
+      z-index: 10;
+    }
+
+    .node.gateway {
+      background: rgba(0, 255, 204, 0.15);
+      border-color: var(--accent);
+      width: 100px;
+      height: 60px;
+    }
+
+    .node.leader {
+      border-color: var(--accent);
+      box-shadow: 0 0 16px rgba(0, 255, 204, 0.5);
+      animation: pulse-glow 2s infinite;
+    }
+
+    .node.candidate {
+      border-color: #ffaa00;
+      box-shadow: 0 0 12px rgba(255, 170, 0, 0.4);
+    }
+
+    .node.follower {
+      border-color: var(--muted);
+    }
+
+    .node.follower.healthy {
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(0, 255, 204, 0.4);
+    }
+
+    .node.crashed {
+      border-color: #ff5555;
+      background: rgba(255, 85, 85, 0.1);
+      box-shadow: 0 0 12px rgba(255, 85, 85, 0.3);
+    }
+
+    .node:hover {
+      transform: scale(1.1);
+      z-index: 15;
+    }
+
+    .node.selected {
+      border-width: 3px;
+      border-color: #ffff00 !important;
+      box-shadow: 0 0 16px rgba(255, 255, 0, 0.6) !important;
+      background: rgba(255, 255, 0, 0.1) !important;
+      z-index: 20;
+    }
+
+    .node-label {
+      font-weight: bold;
+      color: var(--accent);
+      font-size: 0.8rem;
+    }
+
+    .node-role {
+      color: var(--text);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    .node-status {
+      font-size: 0.6rem;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 16px rgba(0, 255, 204, 0.5); }
+      50% { box-shadow: 0 0 24px rgba(0, 255, 204, 0.8); }
+    }
+
+    /* ── DETAILS PANEL ── */
+    #details-panel {
+      flex: 0 0 280px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      background: rgba(13, 13, 26, 0.9);
+      max-height: 100%;
+      overflow-y: auto;
+      font-size: 0.75rem;
+      border-left: 2px solid var(--accent);
+    }
+
+    #details-panel:empty {
+      display: none;
+      flex: 0;
+    }
+
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      margin: 6px 0;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .detail-label {
+      color: var(--muted);
+      font-weight: bold;
+    }
+
+    .detail-value {
+      color: var(--accent);
+      text-align: right;
+      max-width: 140px;
+      word-break: break-word;
+    }
+
+    .detail-title {
+      color: var(--accent);
+      font-weight: bold;
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .detail-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .detail-actions button {
+      flex: 1;
+      padding: 4px 8px;
+      font-size: 0.7rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .detail-actions .crash-btn {
+      border-color: #ff5555;
+      color: #ff5555;
+    }
+
+    .detail-actions .crash-btn:hover {
+      background: rgba(255, 85, 85, 0.1);
+      border-color: #ff3333;
+      color: #ff3333;
+    }
+
+    .detail-actions .recover-btn {
+      border-color: #00ff00;
+      color: #00ff00;
+    }
+
+    .detail-actions .recover-btn:hover {
+      background: rgba(0, 255, 0, 0.1);
+      border-color: #00dd00;
+      color: #00dd00;
+    }
+
+    /* ── RECONNECTING OVERLAY ── */
+    #overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(10,10,15,0.85);
+      backdrop-filter: blur(4px);
+      z-index: 20;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #overlay.show { display: flex; }
+    #overlay p {
+      font-family: 'Syne', sans-serif;
+      font-size: 1.2rem;
+      color: var(--text);
+      animation: pulse 1.2s infinite;
+    }
+    #overlay small { font-size: 0.7rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo">RAFT<span>canvas</span></div>
+    <div id="status-cluster">
+      <div class="status-pill">
+        <div class="dot connecting" id="ws-dot"></div>
+        <span id="ws-label">connecting</span>
+      </div>
+      <div id="status-text" id="leader-info">leader: —</div>
+    </div>
+  </header>
+
+  <!-- TOOLBAR -->
+  <div id="toolbar">
+    <span class="tool-label">color</span>
+    <div class="swatch active" style="background:#00ffcc" data-color="#00ffcc"></div>
+    <div class="swatch"       style="background:#ff3366" data-color="#ff3366"></div>
+    <div class="swatch"       style="background:#ffaa00" data-color="#ffaa00"></div>
+    <div class="swatch"       style="background:#a78bfa" data-color="#a78bfa"></div>
+    <div class="swatch"       style="background:#f8f8f0" data-color="#f8f8f0"></div>
+
+    <div class="divider"></div>
+    <span class="tool-label">size</span>
+    <button class="size-btn active" data-size="3">S</button>
+    <button class="size-btn"        data-size="7">M</button>
+    <button class="size-btn"        data-size="14">L</button>
+
+    <button id="network-btn">network</button>
+    <button id="restore-btn">restore session</button>
+    <button id="clear-btn">clear drawing</button>
+  </div>
+
+  <!-- CANVAS -->
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </div>
+
+</div>
+
+<!-- RECONNECTING OVERLAY -->
+<div id="overlay">
+  <p>reconnecting to cluster...</p>
+  <small>leader election in progress — hang tight</small>
+</div>
+
+<!-- LOG PANEL -->
+<div id="log-panel"></div>
+
+<!-- NETWORK MONITORING MODAL -->
+<div id="network-modal">
+  <div id="network-modal-header">
+    <h2>RAFT Node Topology</h2>
+    <button class="close-modal">×</button>
+  </div>
+  
+  <div id="network-container" style="display: flex; gap: 20px; padding: 16px; height: 100%; overflow: hidden;">
+    <!-- Node Graph Visualization -->
+    <div id="node-graph" style="flex: 1; position: relative; border: 1px solid var(--border); border-radius: var(--radius); background: rgba(10,10,15,0.5); overflow: auto;">
+      <svg id="topology-svg" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></svg>
+      <div id="nodes-container" style="position: relative; width: 100%; height: 100%;"></div>
+    </div>
+    
+    <!-- Details Panel -->
+    <div id="details-panel" style="flex: 0 0 280px; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: rgba(13,13,26,0.8); max-height: 100%; overflow-y: auto;">
+      <div id="details-content"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// CANVAS SETUP
+const canvas  = document.getElementById('canvas');
+const ctx     = canvas.getContext('2d');
+const wrap    = document.getElementById('canvas-wrap');
+
+function resizeCanvas() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+ctx.lineCap  = 'round';
+ctx.lineJoin = 'round';
+
+// TOOL STATE
+let color     = '#00ffcc';
+let lineWidth = 3;
+let drawing   = false;
+let lastX     = 0;
+let lastY     = 0;
+
+document.querySelectorAll('.swatch').forEach(s => {
+  s.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
+    s.classList.add('active');
+    color = s.dataset.color;
+  });
+});
+
+document.querySelectorAll('.size-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.size-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    lineWidth = parseInt(b.dataset.size);
+  });
+});
+
+document.getElementById('clear-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('clear-btn');
+  btn.disabled = true;
+  addLog('Clearing all strokes from cluster...', 'warn');
+  
+  try {
+    const response = await fetch('/clear-all', { method: 'POST' });
+    const data = await response.json();
+    
+    if (data.status === 'completed') {
+      // Clear local canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      const cleared = data.cleared_replicas.length;
+      const failed = data.failed_replicas.length;
+      addLog(`Cleared ${cleared} replica(s), ${failed} failed`, cleared > 0 ? 'ok' : 'err');
+    } else {
+      addLog('Clear failed: ' + (data.message || 'Unknown error'), 'err');
+    }
+  } catch (err) {
+    addLog('Clear error: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// DRAWING — MOUSE + TOUCH
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const src  = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * (canvas.width  / rect.width),
+    y: (src.clientY - rect.top)  * (canvas.height / rect.height),
+  };
+}
+
+canvas.addEventListener('pointerdown', e => {
+  drawing = true;
+  ({ x: lastX, y: lastY } = getPos(e));
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const { x, y } = getPos(e);
+
+  // Draw locally for immediate feedback
+  drawLine(lastX, lastY, x, y, color, lineWidth);
+
+  // Send stroke to gateway
+  sendStroke({ x0: lastX, y0: lastY, x1: x, y1: y, color, lineWidth });
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener('pointerup',    () => { drawing = false; });
+canvas.addEventListener('pointerleave', () => { drawing = false; });
+
+function drawLine(x0, y0, x1, y1, col, width) {
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = width;
+  ctx.stroke();
+}
+
+// WEBSOCKET
+const WS_URL    = `ws://${location.host}/ws`;
+const overlay   = document.getElementById('overlay');
+const wsDot     = document.getElementById('ws-dot');
+const wsLabel   = document.getElementById('ws-label');
+const statusTxt = document.getElementById('status-text');
+
+let ws          = null;
+let reconnectMs = 1000;
+
+function connect() {
+  setStatus('connecting');
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    overlay.classList.remove('show');
+    reconnectMs = 1000;
+    addLog('Connected to gateway', 'ok');
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+
+      if (msg.type === 'stroke' && msg.entry) {
+        const s = msg.entry.stroke;
+        // Draw remote stroke — skip if it looks like our own immediate paint
+        drawLine(s.x0, s.y0, s.x1, s.y1, s.color, s.lineWidth);
+      }
+
+      if (msg.type === 'leader') {
+        statusTxt.textContent = `leader: replica ${msg.leader_id}`;
+      }
+
+    } catch (err) {
+      addLog(`Parse error: ${err.message}`, 'err');
+    }
+  };
+
+  ws.onerror = () => {
+    addLog('WebSocket error', 'err');
+  };
+
+  ws.onclose = () => {
+    setStatus('error');
+    overlay.classList.add('show');
+    addLog(`Disconnected — retrying in ${reconnectMs}ms`, 'warn');
+    setTimeout(() => {
+      reconnectMs = Math.min(reconnectMs * 1.5, 8000);
+      connect();
+    }, reconnectMs);
+  };
+}
+
+function sendStroke(stroke) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(stroke));
+  }
+}
+
+function setStatus(s) {
+  wsDot.className  = `dot ${s}`;
+  wsLabel.textContent = s;
+}
+
+// LOG PANEL
+function addLog(msg, type = '') {
+  const panel = document.getElementById('log-panel');
+  const ts    = new Date().toLocaleTimeString('en', { hour12: false });
+  const div   = document.createElement('div');
+  div.className   = `log-entry ${type}`;
+  div.textContent = `${ts}  ${msg}`;
+  panel.appendChild(div);
+  panel.scrollTop = panel.scrollHeight;
+
+  // Keep last 40 entries
+  while (panel.children.length > 40) panel.removeChild(panel.firstChild);
+}
+
+// RESTORE SESSION
+async function restoreSession() {
+  const btn = document.getElementById('restore-btn');
+  if (btn.classList.contains('loading')) return;
+  
+  btn.classList.add('loading');
+  btn.disabled = true;
+  addLog('Fetching committed strokes...', 'ok');
+
+  try {
+    const response = await fetch('/committed-strokes');
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const strokes = data.strokes || [];
+
+    if (strokes.length === 0) {
+      addLog('No previous strokes to restore', 'warn');
+      btn.classList.remove('loading');
+      btn.disabled = false;
+      return;
+    }
+
+    // Clear canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Redraw all strokes
+    let count = 0;
+    for (const entry of strokes) {
+      if (entry.stroke) {
+        const s = entry.stroke;
+        drawLine(s.x0, s.y0, s.x1, s.y1, s.color, s.lineWidth);
+        count++;
+      }
+    }
+
+    addLog(`Restored ${count} strokes from cluster`, 'ok');
+  } catch (err) {
+    addLog(`Restore failed: ${err.message}`, 'err');
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('restore-btn').addEventListener('click', restoreSession);
+
+// NETWORK MONITORING — RAFT PLAYGROUND
+const networkBtn = document.getElementById('network-btn');
+const networkModal = document.getElementById('network-modal');
+const closeModal = document.querySelector('.close-modal');
+const replicasGrid = document.getElementById('replicas-grid');
+
+let replicaStates = {};
+let monitoringActive = false;
+let monitoringInterval = null;
+let replicaConfig = {
+  1: { url: 'http://localhost:5001', crashing: false },
+  2: { url: 'http://localhost:5002', crashing: false },
+  3: { url: 'http://localhost:5003', crashing: false },
+};
+
+// Load configuration from gateway
+async function loadConfig() {
+  try {
+    const response = await fetch('/config');
+    const config = await response.json();
+    if (config.replica_public_urls) {
+      replicaConfig[1].url = config.replica_public_urls[1] || replicaConfig[1].url;
+      replicaConfig[2].url = config.replica_public_urls[2] || replicaConfig[2].url;
+      replicaConfig[3].url = config.replica_public_urls[3] || replicaConfig[3].url;
+      addLog('Config loaded: replica URLs set', 'ok');
+    }
+  } catch (err) {
+    addLog('Failed to load config, using default URLs', 'warn');
+  }
+}
+
+const REPLICA_IDS = [1, 2, 3];
+
+networkBtn.addEventListener('click', async () => {
+  networkModal.classList.toggle('show');
+  networkBtn.classList.toggle('active');
+  
+  if (networkModal.classList.contains('show')) {
+    monitoringActive = true;
+    await loadConfig();  // Load config on modal open
+    updateReplicaStatus();
+    if (!monitoringInterval) {
+      monitoringInterval = setInterval(updateReplicaStatus, 1000);
+    }
+    addLog('Network monitoring started', 'ok');
+  } else {
+    monitoringActive = false;
+    if (monitoringInterval) {
+      clearInterval(monitoringInterval);
+      monitoringInterval = null;
+    }
+    addLog('Network monitoring stopped', 'warn');
+  }
+});
+
+closeModal.addEventListener('click', () => {
+  networkModal.classList.remove('show');
+  networkBtn.classList.remove('active');
+  monitoringActive = false;
+  if (monitoringInterval) {
+    clearInterval(monitoringInterval);
+    monitoringInterval = null;
+  }
+});
+
+async function updateReplicaStatus() {
+  try {
+    const tasks = REPLICA_IDS.map(id => {
+      const url = replicaConfig[id].url;
+      return fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) })
+        .then(r => {
+          if (r.ok) {
+            return r.json().then(data => ({ id, data, healthy: true, crashed: false }));
+          } else {
+            // Non-200 status = container is likely stopped
+            return { id, error: `HTTP ${r.status}`, healthy: false, crashed: true };
+          }
+        })
+        .catch(err => {
+          // Network error, timeout, or fetch failure = replica is down (crashed)
+          return { id, error: err.message, healthy: false, crashed: true };
+        });
+    });
+
+    const results = await Promise.all(tasks);
+    
+    // Update replica states
+    results.forEach(({ id, data, healthy, error, crashed }) => {
+      if (!replicaStates[id]) {
+        replicaStates[id] = { 
+          previousRole: null, 
+          previousTerm: null, 
+          lastUpdate: null,
+          electionEvents: []
+        };
+      }
+      
+      const state = replicaStates[id];
+      
+      // Detect role changes (elections)
+      if (healthy && data.role && data.role !== 'crashed' && data.role !== state.previousRole) {
+        const event = `${new Date().toLocaleTimeString()}: ${state.previousRole || 'starting'} → ${data.role}`;
+        if (state.electionEvents.length === 0 || !state.electionEvents[state.electionEvents.length - 1].includes(event)) {
+          state.electionEvents.push(event);
+          if (state.electionEvents.length > 10) state.electionEvents.shift();
+          addLog(`Election: Replica ${id} became ${data.role}`, state.electionEvents.length > 0 ? 'warn' : 'ok');
+        }
+      }
+      
+      state.previousRole = healthy && data ? data.role : 'crashed';
+      state.previousTerm = healthy && data ? data.term : null;
+      state.lastUpdate = new Date().toLocaleTimeString();
+      state.healthy = healthy;
+      state.crashed = crashed;
+      state.data = data || null;
+      state.error = error;
+    });
+
+    // Render node graph visualization
+    renderNodeGraph();
+    
+    // Auto-update pinned details to reflect new state
+    if (pinned && pinned.startsWith('replica-')) {
+      const id = parseInt(pinned.split('-')[1]);
+      showDetailsForReplica(id);
+    } else if (pinned === 'gateway') {
+      showDetails('gateway', null);
+    }
+  } catch (err) {
+    addLog(`Monitoring error: ${err.message}`, 'err');
+  }
+}
+
+function renderNodeGraph() {
+  const container = document.getElementById('nodes-container');
+  const svg = document.getElementById('topology-svg');
+  
+  container.innerHTML = '';
+  svg.innerHTML = '';
+  
+  const containerWidth = container.offsetWidth;
+  const containerHeight = container.offsetHeight;
+  
+  // Node positions: gateway at top center, replicas below in a row
+  const positions = {
+    gateway: { x: containerWidth / 2, y: 60, label: 'GATEWAY' },
+    1: { x: containerWidth * 0.2, y: 220, label: 'Replica 1' },
+    2: { x: containerWidth / 2, y: 220, label: 'Replica 2' },
+    3: { x: containerWidth * 0.8, y: 220, label: 'Replica 3' },
+  };
+  
+  // Draw SVG connections
+  const svgNS = 'http://www.w3.org/2000/svg';
+  REPLICA_IDS.forEach(id => {
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', positions.gateway.x);
+    line.setAttribute('y1', positions.gateway.y);
+    line.setAttribute('x2', positions[id].x);
+    line.setAttribute('y2', positions[id].y);
+    line.setAttribute('stroke', 'rgba(0, 255, 204, 0.2)');
+    line.setAttribute('stroke-width', '2');
+    svg.appendChild(line);
+  });
+  
+  // Draw gateway node
+  const gatewayNode = document.createElement('div');
+  gatewayNode.className = 'node gateway';
+  gatewayNode.style.left = (positions.gateway.x - 50) + 'px';
+  gatewayNode.style.top = (positions.gateway.y - 30) + 'px';
+  gatewayNode.innerHTML = '<div class="node-label">🌐 GATEWAY</div>';
+  gatewayNode.addEventListener('click', () => {
+    // Remove selected from all replica nodes
+    document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
+    showDetails('gateway', null);
+  });
+  container.appendChild(gatewayNode);
+  
+  // Draw replica nodes
+  REPLICA_IDS.forEach(id => {
+    const state = replicaStates[id] || {};
+    const data = state.data;
+    const isCrashed = state.crashed || (data && data.role === 'crashed');
+    const isHealthy = state.healthy && !isCrashed;
+    const roleClass = isCrashed ? 'crashed' : (data ? data.role : 'follower');
+    
+    const node = document.createElement('div');
+    let nodeClassName = `node ${roleClass}`;
+    if (isHealthy && roleClass === 'follower') {
+      nodeClassName += ' healthy';
+    }
+    node.className = nodeClassName;
+    node.id = `node-${id}`;
+    node.style.left = (positions[id].x - 40) + 'px';
+    node.style.top = (positions[id].y - 40) + 'px';
+    
+    const roleBadge = isCrashed ? '🔴' : (data ? (data.role === 'leader' ? '👑' : (data.role === 'candidate' ? '🗳️' : '👥')) : '❓');
+    const roleText = isCrashed ? 'CRASHED' : (data ? data.role.toUpperCase() : 'OFFLINE');
+    const statusText = data && !isCrashed ? `T:${data.term}` : '';
+    
+    node.innerHTML = `
+      <div class="node-label">${id}</div>
+      <div class="node-role">${roleBadge} ${roleText}</div>
+      <div class="node-status">${statusText}</div>
+    `;
+    
+    node.addEventListener('click', () => {
+      // Remove selected from all nodes
+      document.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'));
+      // Add selected to this node
+      node.classList.add('selected');
+      showDetails(`replica-${id}`, id);
+    });
+    node.addEventListener('mouseenter', () => {
+      if (!pinned || pinned !== `replica-${id}`) {
+        showDetailsOnHover(`replica-${id}`, id);
+      }
+    });
+    node.addEventListener('mouseleave', () => {
+      if (!pinned) {
+        hideDetails();
+      }
+    });
+    
+    container.appendChild(node);
+  });
+}
+
+let pinned = null;  // Track which node's details are pinned
+
+function showDetails(nodeId, replicaId) {
+  pinned = nodeId;
+  if (replicaId === null) {
+    // Gateway node
+    const detailsContent = document.getElementById('details-content');
+    detailsContent.innerHTML = `
+        <div class="detail-title">🌐 GATEWAY</div>
+        <div class="detail-row"><span class="detail-label">Leader URL:</span><span class="detail-value">-</span></div>
+        <div class="detail-row"><span class="detail-label">Connected Clients:</span><span class="detail-value">-</span></div>
+        <div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value">Running</span></div>
+      `;
+    } else {
+      showDetailsForReplica(replicaId);
+    }
+}
+
+function showDetailsOnHover(nodeId, replicaId) {
+  if (pinned) return;  // Don't show hover if details are pinned
+  showDetailsForReplica(replicaId);
+}
+
+function showDetailsForReplica(replicaId) {
+  const state = replicaStates[replicaId] || {};
+  const data = state.data;
+  const isCrashed = state.crashed || (data && data.role === 'crashed');
+  
+  const detailsPanel = document.getElementById('details-panel');
+  const detailsContent = document.getElementById('details-content');
+  
+  let actionButtons = '';
+  if (!isCrashed) {
+    actionButtons = `<button class="crash-btn" onclick="crashReplica(${replicaId})">🔴 Crash</button>`;
+  } else {
+    actionButtons = `<button class="recover-btn" onclick="recoverReplica(${replicaId})">🟢 Recover</button>`;
+  }
+  
+  if (data && !isCrashed) {
+    detailsContent.innerHTML = `
+      <div class="detail-title">Replica ${replicaId}</div>
+      <div class="detail-row"><span class="detail-label">Role:</span><span class="detail-value">${data.role.toUpperCase()}</span></div>
+      <div class="detail-row"><span class="detail-label">Term:</span><span class="detail-value">${data.term}</span></div>
+      <div class="detail-row"><span class="detail-label">Leader ID:</span><span class="detail-value">${data.leader_id !== null ? data.leader_id : '—'}</span></div>
+      <div class="detail-row"><span class="detail-label">Log Entries:</span><span class="detail-value">${data.log_length}</span></div>
+      <div class="detail-row"><span class="detail-label">Commit Index:</span><span class="detail-value">${data.commit_index}</span></div>
+      <div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value">✅ Healthy</span></div>
+      <div class="detail-row"><span class="detail-label">Updated:</span><span class="detail-value">${state.lastUpdate || '—'}</span></div>
+      <div class="detail-actions">${actionButtons}</div>
+    `;
+  } else if (isCrashed) {
+    detailsContent.innerHTML = `
+      <div class="detail-title">Replica ${replicaId}</div>
+      <div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value">🔴 CRASHED</span></div>
+      <div class="detail-row"><span class="detail-label">Updated:</span><span class="detail-value">${state.lastUpdate || '—'}</span></div>
+      <div class="detail-actions">${actionButtons}</div>
+    `;
+  } else {
+    detailsContent.innerHTML = `
+      <div class="detail-title">Replica ${replicaId}</div>
+      <div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value">❌ Offline</span></div>
+      <div class="detail-row"><span class="detail-label">Error:</span><span class="detail-value">${state.error || 'Connection lost'}</span></div>
+      <div class="detail-actions">${actionButtons}</div>
+    `;
+  }
+}
+
+function hideDetails() {
+  const detailsContent = document.getElementById('details-content');
+  detailsContent.innerHTML = '';
+  pinned = null;
+}
+
+// Crash/Recover functions for RAFT playground
+async function crashReplica(replicaId) {
+  try {
+    const response = await fetch(`/crash/${replicaId}`, { method: 'POST' });
+    if (response.ok) {
+      const data = await response.json();
+      addLog(`🔴 Crashed Replica ${replicaId}`, 'warn');
+      await new Promise(r => setTimeout(r, 1000)); // Wait for container to stop
+      updateReplicaStatus();
+    } else {
+      const err = await response.text();
+      addLog(`Failed to crash Replica ${replicaId}: ${err}`, 'err');
+    }
+  } catch (err) {
+    addLog(`Error crashing Replica ${replicaId}: ${err.message}`, 'err');
+  }
+}
+
+async function recoverReplica(replicaId) {
+  try {
+    const response = await fetch(`/recover/${replicaId}`, { method: 'POST' });
+    if (response.ok) {
+      const data = await response.json();
+      addLog(`🟢 Recovering Replica ${replicaId}...`, 'ok');
+      // Wait for containers to start
+      await new Promise(r => setTimeout(r, 5000));
+      updateReplicaStatus();
+    } else {
+      const err = await response.text();
+      addLog(`Failed to recover Replica ${replicaId}: ${err}`, 'err');
+    }
+  } catch (err) {
+    addLog(`Error recovering Replica ${replicaId}: ${err.message}`, 'err');
+  }
+}
+
+// Update monitoring when stroke is made
+const originalSendStroke = sendStroke;
+sendStroke = function(stroke) {
+  originalSendStroke(stroke);
+  if (monitoringActive) {
+    updateReplicaStatus();
+  }
+};
+
+// BOOT
+connect();
+addLog('Initialising RAFT canvas...', 'ok');
+</script>
+</body>
+</html>

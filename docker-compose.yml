@@ -1,0 +1,170 @@
+services:
+  # MongoDB for Replica 1
+  mongo1:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DB: replica1_db
+    volumes:
+      - mongo1_data:/data/db
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # MongoDB for Replica 2
+  mongo2:
+    image: mongo:7.0
+    ports:
+      - "27018:27017"
+    environment:
+      MONGO_INITDB_DB: replica2_db
+    volumes:
+      - mongo2_data:/data/db
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # MongoDB for Replica 3
+  mongo3:
+    image: mongo:7.0
+    ports:
+      - "27019:27017"
+    environment:
+      MONGO_INITDB_DB: replica3_db
+    volumes:
+      - mongo3_data:/data/db
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Gateway
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - REPLICA_URLS=http://replica1:5000,http://replica2:5000,http://replica3:5000
+    volumes:
+      - ./gateway:/usr/src/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      replica1:
+        condition: service_healthy
+      replica2:
+        condition: service_healthy
+      replica3:
+        condition: service_healthy
+    networks:
+      - raft-network
+    restart: unless-stopped
+
+  # REPLICA 1
+  replica1:
+    build:
+      context: ./replica
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5000"
+    environment:
+      - REPLICA_ID=1
+      - PORT=5000
+      - PEERS=http://replica2:5000,http://replica3:5000
+      - MONGO_URI=mongodb://mongo1:27017/replica1_db
+    volumes:
+      - ./replica1:/usr/src/app
+    depends_on:
+      mongo1:
+        condition: service_healthy
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # REPLICA 2
+  replica2:
+    build:
+      context: ./replica
+      dockerfile: Dockerfile
+    ports:
+      - "5002:5000"
+    environment:
+      - REPLICA_ID=2
+      - PORT=5000
+      - PEERS=http://replica1:5000,http://replica3:5000
+      - MONGO_URI=mongodb://mongo2:27017/replica2_db
+    volumes:
+      - ./replica2:/usr/src/app
+    depends_on:
+      mongo2:
+        condition: service_healthy
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # REPLICA 3
+  replica3:
+    build:
+      context: ./replica
+      dockerfile: Dockerfile
+    ports:
+      - "5003:5000"
+    environment:
+      - REPLICA_ID=3
+      - PORT=5000
+      - PEERS=http://replica1:5000,http://replica2:5000
+      - MONGO_URI=mongodb://mongo3:27017/replica3_db
+    volumes:
+      - ./replica3:/usr/src/app
+    depends_on:
+      mongo3:
+        condition: service_healthy
+    networks:
+      - raft-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
+
+networks:
+  raft-network:
+    driver: bridge
