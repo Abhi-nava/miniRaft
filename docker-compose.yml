@@ -92,7 +92,7 @@ services:
       - PEERS=http://replica2:5000,http://replica3:5000
       - MONGO_URI=mongodb://mongo1:27017/replica1_db
     volumes:
-      - ./replica1:/usr/src/app
+      - ./replica:/usr/src/app
     depends_on:
       mongo1:
         condition: service_healthy
@@ -119,7 +119,7 @@ services:
       - PEERS=http://replica1:5000,http://replica3:5000
       - MONGO_URI=mongodb://mongo2:27017/replica2_db
     volumes:
-      - ./replica2:/usr/src/app
+      - ./replica:/usr/src/app
     depends_on:
       mongo2:
         condition: service_healthy
@@ -146,7 +146,7 @@ services:
       - PEERS=http://replica1:5000,http://replica2:5000
       - MONGO_URI=mongodb://mongo3:27017/replica3_db
     volumes:
-      - ./replica3:/usr/src/app
+      - ./replica:/usr/src/app
     depends_on:
       mongo3:
         condition: service_healthy
