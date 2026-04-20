@@ -64,7 +64,10 @@ HEARTBEAT_INTERVAL   = 0.20   # 200 ms — leader sends heartbeats this often
 ELECTION_TIMEOUT_MIN = 3.0
 ELECTION_TIMEOUT_MAX = 6.0
 
-HEARTBEAT_SEND_DEADLINE = 1.0
+HEARTBEAT_SEND_DEADLINE = 2.5
+HEARTBEAT_RPC_TIMEOUT = 1.5
+VOTE_RPC_TIMEOUT = 1.5
+HEARTBEAT_PEER_BACKOFF = 1.0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +75,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+raft_http_client: Optional[httpx.AsyncClient] = None
 
 # ── MONGODB INITIALIZATION (async Motor) ───────────────────────────────────────
 # FIX 1: Motor is non-blocking; all DB calls are awaited and never block the loop.
@@ -162,6 +167,7 @@ class RaftState:
         # match_index[peer_url] = highest log index known to be replicated on that peer
         self.next_index:  dict[str, int] = {}
         self.match_index: dict[str, int] = {}
+        self.peer_backoff_until: dict[str, float] = {peer: 0.0 for peer in PEER_URLS}
 
     def _new_timeout(self) -> float:
         # Add a per-replica bias (100ms * REPLICA_ID) so even in the worst case
@@ -185,6 +191,7 @@ class RaftState:
         for peer in PEER_URLS:
             self.next_index[peer]  = self.last_log_index() + 1
             self.match_index[peer] = -1
+            self.peer_backoff_until[peer] = 0.0
 
 state = RaftState()
 
@@ -469,28 +476,29 @@ async def _step_down(new_term: int):
     if new_term < state.current_term:
         return   # never go backwards
 
-    term_advanced      = new_term > state.current_term
+    old_term = state.current_term
+    term_advanced = new_term > old_term
+
     state.current_term = new_term
-    state.role         = Role.FOLLOWER
-    state.voted_for    = None
-    state.leader_id    = None
+    state.role = Role.FOLLOWER
+    state.leader_id = None
 
     if term_advanced:
-        # Fresh term — give ourselves a full new random timeout window
+        # New term: clear vote and persist it exactly once for this term.
+        state.voted_for = None
         state.reset_election_timer()
-    # Same term: keep the existing timer; the new leader's heartbeat will
-    # reset it via reset_election_timer() inside append_entries
+        await save_state_to_db({
+            "key":          "raft_state",
+            "current_term": state.current_term,
+            "voted_for":    None,
+        })
+    # Same-term step-down: keep voted_for unchanged to preserve RAFT's
+    # one-vote-per-term rule and avoid leader flip-flopping.
 
     log.info(
-        f"Stepped down → follower: term={state.current_term}, "
-        f"timer_reset={term_advanced}"
+        f"Stepped down -> follower: term={state.current_term}, "
+        f"term_advanced={term_advanced}, voted_for={state.voted_for}"
     )
-
-    await save_state_to_db({
-        "key":          "raft_state",
-        "current_term": state.current_term,
-        "voted_for":    None,
-    })
 
 
 async def _replicate_entry(entry: dict) -> int:
@@ -499,31 +507,38 @@ async def _replicate_entry(entry: dict) -> int:
     Send AppendEntries to all peers; return count of successful ACKs.
     """
     acks = 0
+    if raft_http_client is None:
+        return acks
 
-    async with httpx.AsyncClient(timeout=1.0) as client:
-        tasks = []
-        peers_in_flight = []
+    tasks = []
+    peers_in_flight = []
 
-        for peer in PEER_URLS:
-            ni         = state.next_index.get(peer, entry["index"])
-            prev_index = ni - 1
-            prev_term  = state.log[prev_index]["term"] if prev_index >= 0 and prev_index < len(state.log) else 0
+    for peer in PEER_URLS:
+        ni         = state.next_index.get(peer, entry["index"])
+        prev_index = ni - 1
+        prev_term  = state.log[prev_index]["term"] if prev_index >= 0 and prev_index < len(state.log) else 0
 
-            # Send all entries from next_index up to and including the new one
-            entries_to_send = [e for e in state.log if ni <= e["index"] <= entry["index"]]
+        # Send all entries from next_index up to and including the new one
+        entries_to_send = [e for e in state.log if ni <= e["index"] <= entry["index"]]
 
-            payload = AppendEntriesRequest(
-                term           = state.current_term,
-                leader_id      = REPLICA_ID,
-                prev_log_index = prev_index,
-                prev_log_term  = prev_term,
-                entries        = entries_to_send,
-                leader_commit  = state.commit_index,
+        payload = AppendEntriesRequest(
+            term           = state.current_term,
+            leader_id      = REPLICA_ID,
+            prev_log_index = prev_index,
+            prev_log_term  = prev_term,
+            entries        = entries_to_send,
+            leader_commit  = state.commit_index,
+        )
+        tasks.append(
+            raft_http_client.post(
+                f"{peer}/append-entries",
+                json=payload.model_dump(),
+                timeout=HEARTBEAT_RPC_TIMEOUT,
             )
-            tasks.append(client.post(f"{peer}/append-entries", json=payload.model_dump()))
-            peers_in_flight.append(peer)
+        )
+        peers_in_flight.append(peer)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for peer, result in zip(peers_in_flight, results):
         if isinstance(result, Exception):
@@ -563,8 +578,13 @@ async def _catchup_peer(peer_url: str, from_index: int):
         leader_commit  = state.commit_index,
     )
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.post(f"{peer_url}/append-entries", json=payload.model_dump())
+        if raft_http_client is None:
+            return
+        resp = await raft_http_client.post(
+            f"{peer_url}/append-entries",
+            json=payload.model_dump(),
+            timeout=2.0,
+        )
         if resp.status_code == 200 and resp.json().get("success"):
             state.next_index[peer_url]  = state.commit_index + 1
             state.match_index[peer_url] = state.commit_index
@@ -583,37 +603,57 @@ async def _send_heartbeats():
            so it can never block the timer loop for more than one tick.
     """
     async def _do_send():
-        async with httpx.AsyncClient(timeout=0.6) as client:
-            tasks = []
-            peers_in_flight = []
+        if raft_http_client is None:
+            return
 
-            for peer in PEER_URLS:
-                ni         = state.next_index.get(peer, state.last_log_index() + 1)
-                prev_index = ni - 1
-                prev_term  = state.log[prev_index]["term"] if 0 <= prev_index < len(state.log) else 0
+        tasks = []
+        peers_in_flight = []
+        now = time.monotonic()
 
-                payload = {
-                    "term":           state.current_term,
-                    "leader_id":      REPLICA_ID,
-                    "prev_log_index": prev_index,
-                    "prev_log_term":  prev_term,
-                    "entries":        [],
-                    "leader_commit":  state.commit_index,
-                }
-                tasks.append(client.post(f"{peer}/append-entries", json=payload))
-                peers_in_flight.append(peer)
+        for peer in PEER_URLS:
+            if state.peer_backoff_until.get(peer, 0.0) > now:
+                continue
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            ni         = state.next_index.get(peer, state.last_log_index() + 1)
+            prev_index = ni - 1
+            prev_term  = state.log[prev_index]["term"] if 0 <= prev_index < len(state.log) else 0
+
+            payload = {
+                "term":           state.current_term,
+                "leader_id":      REPLICA_ID,
+                "prev_log_index": prev_index,
+                "prev_log_term":  prev_term,
+                "entries":        [],
+                "leader_commit":  state.commit_index,
+            }
+            tasks.append(
+                raft_http_client.post(
+                    f"{peer}/append-entries",
+                    json=payload,
+                    timeout=HEARTBEAT_RPC_TIMEOUT,
+                )
+            )
+            peers_in_flight.append(peer)
+
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for peer, result in zip(peers_in_flight, results):
             if isinstance(result, Exception):
-                log.warning(f"Heartbeat to {peer} failed: {result}")
+                state.peer_backoff_until[peer] = time.monotonic() + HEARTBEAT_PEER_BACKOFF
+                log.warning(f"Heartbeat to {peer} failed: {type(result).__name__}: {result}")
                 continue
             if result.status_code == 200:
+                state.peer_backoff_until[peer] = 0.0
                 data = result.json()
                 if data.get("term", 0) > state.current_term:
                     await _step_down(data["term"])
                     return
+            else:
+                state.peer_backoff_until[peer] = time.monotonic() + HEARTBEAT_PEER_BACKOFF
+                log.warning(f"Heartbeat to {peer} returned HTTP {result.status_code}")
 
     try:
         await asyncio.wait_for(_do_send(), timeout=HEARTBEAT_SEND_DEADLINE)
@@ -656,13 +696,21 @@ async def _start_election():
     try:
         # Cap vote gathering so a very slow peer cannot block election progress.
         async def _gather_votes():
-            async with httpx.AsyncClient(timeout=0.8) as client:
-                tasks   = [client.post(f"{peer}/request-vote", json=vote_request) for peer in PEER_URLS]
-                return await asyncio.gather(*tasks, return_exceptions=True)
+            if raft_http_client is None:
+                return []
+            tasks = [
+                raft_http_client.post(
+                    f"{peer}/request-vote",
+                    json=vote_request,
+                    timeout=VOTE_RPC_TIMEOUT,
+                )
+                for peer in PEER_URLS
+            ]
+            return await asyncio.gather(*tasks, return_exceptions=True)
 
         results = await asyncio.wait_for(
             _gather_votes(),
-            timeout=min(2.0, ELECTION_TIMEOUT_MIN * 0.8)
+            timeout=min(4.0, ELECTION_TIMEOUT_MIN * 0.9)
         )
     except asyncio.TimeoutError:
         log.warning("Election vote-gathering timed out — reverting to follower")
@@ -707,6 +755,7 @@ async def _raft_loop():
     log.info(f"RAFT loop started. Role: {state.role}, Peers: {PEER_URLS}")
     last_heartbeat_sent: float = 0.0
     heartbeat_task: Optional[asyncio.Task] = None
+    heartbeat_task_started_at: float = 0.0
 
     while True:
         await asyncio.sleep(0.05)   # pure sleep — never blocked
@@ -714,13 +763,29 @@ async def _raft_loop():
         now = time.monotonic()
 
         if state.role == Role.LEADER:
+            # If a heartbeat wave is stuck, cancel it so it cannot block all
+            # future heartbeats and trigger follower election timeouts.
+            if (
+                heartbeat_task is not None
+                and not heartbeat_task.done()
+                and (now - heartbeat_task_started_at) > HEARTBEAT_SEND_DEADLINE
+            ):
+                heartbeat_task.cancel()
+                heartbeat_task = None
+
             if now - last_heartbeat_sent >= HEARTBEAT_INTERVAL:
                 # Keep at most one heartbeat RPC wave in flight at a time.
                 if heartbeat_task is None or heartbeat_task.done():
                     heartbeat_task = asyncio.create_task(_send_heartbeats())
+                    heartbeat_task_started_at = now
                     last_heartbeat_sent = now
 
         elif state.role == Role.FOLLOWER:
+            # If we are no longer leader, abandon any stale leader heartbeat task.
+            if heartbeat_task is not None and not heartbeat_task.done():
+                heartbeat_task.cancel()
+            heartbeat_task = None
+
             elapsed = now - state.last_heartbeat
             if elapsed >= state.election_timeout:
                 log.info(f"Election timeout after {elapsed:.2f}s — starting election")
@@ -736,8 +801,16 @@ async def _raft_loop():
 # ── STARTUP ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
+    global raft_http_client
+
     # FIX 1: ensure indexes exist before anything else
     await init_mongo_indexes()
+
+    # Reuse one HTTP client for all RAFT RPCs to avoid per-heartbeat
+    # connection churn and reduce false ConnectTimeouts.
+    raft_http_client = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0)
+    )
 
     # Load persistent RAFT state asynchronously
     saved = await load_state_from_db()
@@ -753,3 +826,11 @@ async def startup():
 
     asyncio.create_task(_raft_loop())
     log.info(f"Replica {REPLICA_ID} started on port {PORT}")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global raft_http_client
+    if raft_http_client is not None:
+        await raft_http_client.aclose()
+        raft_http_client = None
