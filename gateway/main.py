@@ -157,6 +157,18 @@ async def clear_all():
                 results["failed_replicas"].append({"url": url, "status_code": response.status_code})
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+    # Broadcast clear message to all connected clients so they refresh/clear
+    print(f"[DEBUG] Broadcasting 'clear' to {len(gw.clients)} clients")
+    log.info(f"Broadcasting 'clear' to {len(gw.clients)} clients")
+    tasks = []
+    for client in list(gw.clients):
+        # We use a simple type "clear" which clients will handle by refreshing their session
+        tasks.append(client.send_json({"type": "clear"}))
+    
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     return results
 
 # Resolve containers by compose service label so project-name prefixes do not break controls.

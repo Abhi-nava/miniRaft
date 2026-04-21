@@ -510,7 +510,7 @@
         <div class="dot connecting" id="ws-dot"></div>
         <span id="ws-label">connecting</span>
       </div>
-      <div id="status-text" id="leader-info">leader: —</div>
+      <!-- <div id="status-text" id="leader-info">leader: —</div> -->
     </div>
   </header>
 
@@ -573,6 +573,7 @@
 
 <script>
 // CANVAS SETUP
+console.log("Distributed Canvas Client Loaded - V2");
 const canvas  = document.getElementById('canvas');
 const ctx     = canvas.getContext('2d');
 const wrap    = document.getElementById('canvas-wrap');
@@ -795,6 +796,12 @@ function connect() {
 
       if (msg.type === 'leader') {
         statusTxt.textContent = `leader: replica ${msg.leader_id}`;
+      }
+
+      if (msg.type === 'clear') {
+        addLog('Cluster cleared. Refreshing session...', 'warn');
+        clearPendingStrokes();
+        restoreSession();
       }
 
     } catch (err) {
