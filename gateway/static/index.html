@@ -587,12 +587,79 @@ window.addEventListener('resize', resizeCanvas);
 ctx.lineCap  = 'round';
 ctx.lineJoin = 'round';
 
+// Restore unconfirmed strokes from localStorage on page load
+restorePendingStrokes();
+
 // TOOL STATE
 let color     = '#00ffcc';
 let lineWidth = 3;
 let drawing   = false;
 let lastX     = 0;
 let lastY     = 0;
+
+// LOCAL STORAGE FOR PENDING STROKES
+const PENDING_STROKES_KEY = 'raftCanvas_pendingStrokes';
+let pendingStrokeIndex = 0;  // Monotonic ID for tracking unconfirmed strokes
+
+function getPendingStrokes() {
+  try {
+    const stored = localStorage.getItem(PENDING_STROKES_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePendingStroke(strokeId, stroke) {
+  try {
+    const pending = getPendingStrokes();
+    pending[strokeId] = { ...stroke, confirmed: false };
+    localStorage.setItem(PENDING_STROKES_KEY, JSON.stringify(pending));
+  } catch (err) {
+    addLog(`Failed to save to localStorage: ${err.message}`, 'warn');
+  }
+}
+
+function removePendingStroke(strokeId) {
+  try {
+    const pending = getPendingStrokes();
+    delete pending[strokeId];
+    localStorage.setItem(PENDING_STROKES_KEY, JSON.stringify(pending));
+  } catch (err) {
+    addLog(`Failed to update localStorage: ${err.message}`, 'warn');
+  }
+}
+
+function clearPendingStrokes() {
+  try {
+    localStorage.removeItem(PENDING_STROKES_KEY);
+  } catch (err) {
+    addLog(`Failed to clear localStorage: ${err.message}`, 'warn');
+  }
+}
+
+function restorePendingStrokes() {
+  const pending = getPendingStrokes();
+  const strokeIds = Object.keys(pending);
+  
+  if (strokeIds.length > 0) {
+    addLog(`Restoring ${strokeIds.length} unconfirmed strokes...`, 'warn');
+    // Ensure pendingStrokeIndex resumes past the highest stored ID
+    const numericIds = strokeIds.map(i => parseInt(i, 10)).filter(n => !Number.isNaN(n));
+    if (numericIds.length) pendingStrokeIndex = Math.max(...numericIds);
+
+    strokeIds.forEach(id => {
+      const stroke = pending[id];
+      if (stroke && stroke.x0 !== undefined) {
+        // Draw with slightly faded appearance to indicate unconfirmed
+        ctx.globalAlpha = 0.4;
+        drawLine(stroke.x0, stroke.y0, stroke.x1, stroke.y1, stroke.color, stroke.lineWidth);
+        ctx.globalAlpha = 1.0;
+      }
+    });
+    addLog(`${strokeIds.length} unconfirmed strokes restored from localStorage`, 'warn');
+  }
+}
 
 document.querySelectorAll('.swatch').forEach(s => {
   s.addEventListener('click', () => {
@@ -623,9 +690,12 @@ document.getElementById('clear-btn').addEventListener('click', async () => {
       // Clear local canvas
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
+      // Clear localStorage
+      clearPendingStrokes();
+      
       const cleared = data.cleared_replicas.length;
       const failed = data.failed_replicas.length;
-      addLog(`Cleared ${cleared} replica(s), ${failed} failed`, cleared > 0 ? 'ok' : 'err');
+      addLog(`Cleared ${cleared} replica(s), ${failed} failed. Local storage cleared.`, cleared > 0 ? 'ok' : 'err');
     } else {
       addLog('Clear failed: ' + (data.message || 'Unknown error'), 'err');
     }
@@ -655,11 +725,20 @@ canvas.addEventListener('pointermove', e => {
   if (!drawing) return;
   const { x, y } = getPos(e);
 
-  // Draw locally for immediate feedback
+  // Draw locally for immediate feedback (faded until committed)
+  ctx.globalAlpha = 0.4;
   drawLine(lastX, lastY, x, y, color, lineWidth);
+  ctx.globalAlpha = 1.0;
 
-  // Send stroke to gateway
-  sendStroke({ x0: lastX, y0: lastY, x1: x, y1: y, color, lineWidth });
+  // Create stroke object and send to gateway
+  const stroke = { x0: lastX, y0: lastY, x1: x, y1: y, color, lineWidth };
+  const strokeId = ++pendingStrokeIndex;
+  
+  // Save to localStorage as unconfirmed
+  savePendingStroke(strokeId, stroke);
+  
+  // Send stroke with ID to gateway
+  sendStroke({ ...stroke, strokeId });
 
   lastX = x;
   lastY = y;
@@ -706,6 +785,12 @@ function connect() {
         const s = msg.entry.stroke;
         // Draw remote stroke — skip if it looks like our own immediate paint
         drawLine(s.x0, s.y0, s.x1, s.y1, s.color, s.lineWidth);
+
+        // If this stroke has a strokeId inside the entry, it was committed — remove from pending
+        if (s && s.strokeId) {
+          removePendingStroke(s.strokeId);
+          addLog(`Stroke committed (ID: ${s.strokeId})`, 'ok');
+        }
       }
 
       if (msg.type === 'leader') {
@@ -785,7 +870,7 @@ async function restoreSession() {
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Redraw all strokes
+    // Redraw all committed strokes
     let count = 0;
     for (const entry of strokes) {
       if (entry.stroke) {
@@ -795,7 +880,10 @@ async function restoreSession() {
       }
     }
 
-    addLog(`Restored ${count} strokes from cluster`, 'ok');
+    // Restore pending (unconfirmed) strokes on top
+    restorePendingStrokes();
+
+    addLog(`Restored ${count} committed strokes + unconfirmed strokes from cluster`, 'ok');
   } catch (err) {
     addLog(`Restore failed: ${err.message}`, 'err');
   } finally {

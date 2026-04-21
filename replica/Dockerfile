@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # but we copy it here too so the image is self-contained for CI/CD
 COPY . .
 
-# --reload watches /usr/src/app for file changes → hot-reload on save
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
+# Run without auto-reload in Docker to keep a single stable RAFT process
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000", "--no-access-log"]
