@@ -1,4 +1,5 @@
-# RAFT: current_term and Leader Election
+
+# RAFT: State Variables, current_term, and Leader Election
 
 ## Part 1: Understanding `current_term`
 
@@ -27,23 +28,74 @@
    - Entries with the same term came from the same leader
    - Used for consistency verification
 
-### RAFT State Initialization
+
+### RAFT State Variables (from implementation)
 
 ```python
 class RaftState:
     def __init__(self):
-        # Persistent state
-        self.current_term: int = 0              # Atomic clock, starts at 0
-        self.voted_for: Optional[int] = None    # Which candidate we voted for this term
+        # Persistent state (survives crashes)
+        self.current_term: int = saved_state.get("current_term", 0)  # Latest term seen
+        self.voted_for: Optional[int] = saved_state.get("voted_for", None)  # Candidate voted for in current term
 
-        # Volatile state
-        self.role: Role = Role.FOLLOWER         # Initial role
-        self.leader_id: Optional[int] = None    # Current leader's ID
-        
+        # Volatile state (in-memory only)
+        self.role: Role = Role.FOLLOWER         # Current role: FOLLOWER, CANDIDATE, or LEADER
+        self.leader_id: Optional[int] = None    # Current leader's ID, if known
+
         # Log state
-        self.log: list[dict] = []               # Replicated log
-        self.commit_index: int = -1             # Last committed entry index
+        self.log: list[dict] = load_log_from_db()  # Replicated log entries
+        self.commit_index: int = -1             # Index of highest log entry known to be committed
+
+        # Election timer
+        self.last_heartbeat: float = time.time()    # Last heartbeat received
+        self.election_timeout: float = self._new_timeout()  # Randomized election timeout
+
+    def _new_timeout(self) -> float:
+        return random.uniform(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
+
+    def reset_election_timer(self):
+        self.last_heartbeat = time.time()
+        self.election_timeout = self._new_timeout()
+
+    def last_log_index(self) -> int:
+        return len(self.log) - 1
+
+    def last_log_term(self) -> int:
+        return self.log[-1]["term"] if self.log else 0
 ```
+
+#### Summary of RAFT State Variables
+
+- **Persistent State:**
+    - `current_term`: Latest term the server has seen (monotonically increasing, survives crashes)
+    - `voted_for`: Candidate ID that received vote in current term (or None)
+- **Volatile State:**
+    - `role`: Current role of the server (`FOLLOWER`, `CANDIDATE`, `LEADER`)
+    - `leader_id`: The ID of the current leader, if known
+    - `log`: List of log entries, each with an index and term
+    - `commit_index`: Index of the highest log entry known to be committed
+    - `last_heartbeat`: Timestamp of the last heartbeat received
+    - `election_timeout`: Randomized timeout for triggering elections
+
+#### State Transitions and Election Management
+
+- On election timeout, follower becomes candidate, increments `current_term`, votes for self, and starts election
+- On receiving higher term, step down to follower, update `current_term`, reset vote and leader
+- Election timer is randomized to avoid split votes
+
+#### Key Functions
+
+- `reset_election_timer()`: Resets the election timer
+- `_new_timeout()`: Generates a new randomized election timeout
+- `last_log_index()`, `last_log_term()`: Helpers for log state
+
+#### Message Types (RPCs)
+
+- `VoteRequest`, `VoteResponse`: For leader election
+- `AppendEntriesRequest`, `AppendEntriesResponse`: For log replication and heartbeats
+- `SyncLogRequest`: For log synchronization
+
+---
 
 ### Three Core Uses of `current_term`
 

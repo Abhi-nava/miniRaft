@@ -82,7 +82,7 @@ def save_to_db_async(entry: dict):
         log.warning(f"Failed to save entry to DB: {e}")
 
 def load_log_from_db() -> list[dict]:
-    """Load all log entries from MongoDB."""
+    """Load all log entries from MongoDB in sorted order."""
     try:
         entries = list(log_collection.find({}, {"_id": 0}).sort("index", 1))
         log.info(f"Loaded {len(entries)} entries from MongoDB")
@@ -329,6 +329,7 @@ async def append_entries(req: AppendEntriesRequest):
     state.reset_election_timer()
 
     # ── Consistency check ──────────────────────────────────────────────
+
     if req.prev_log_index >= 0:
         if req.prev_log_index > state.last_log_index():
             # We're missing entries — tell leader where our log ends
@@ -651,6 +652,9 @@ async def _raft_loop():
     log.info(f"RAFT loop started. Role: {state.role}, Peers: {PEER_URLS}")
     while True:
         await asyncio.sleep(0.05)   # tick every 50 ms
+        
+        if crashed:
+            continue
 
         if state.role == Role.LEADER:
             await _send_heartbeats()
